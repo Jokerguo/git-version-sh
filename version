@@ -1,0 +1,530 @@
+#!/bin/sh
+
+operate="merge"
+
+shPath=$(dirname "$(readlink -f $0)")
+
+function exitWithError() {
+  read -s -n1 -p "脚本执行失败，按任意键退出！"
+  exit 1
+}
+
+while getopts ":o:v:h" optname; do
+  case "$optname" in
+  "o")
+    if [[ ${OPTARG} != "new" && ${OPTARG} != "merge" && ${OPTARG} != "check" && ${OPTARG} != "build"&& ${OPTARG} != "publish" && ${OPTARG} != "fix" && ${OPTARG} != "move" ]]; then
+      echo -e "\033[31m参数 -o ${OPTARG} 错误\033[0m"
+      exitWithError
+    fi
+    operate=${OPTARG}
+    ;;
+  "v")
+    version=${OPTARG}
+    ;;
+  "h")
+    echo "例如：./version.sh -o merge"
+    echo "-o  操作:     new merge check build publish fix move，默认为 merge"
+    echo "    new:      创建新的版本功能分支"
+    echo "    merge:    合并功能分支到版本主分支"
+    echo "    check:    检测当前版本的分支是否都合并到主分支"
+    echo "    build:    切换到版本主分支，等待打包"
+    echo "    publish:  发布版本，版本主分支合并到master分支"
+    echo "    fix:      创建一个修复分支，修复线上版本Bug"
+    echo "    move:     版本功能分支迁移到下个版本"
+    echo "-v 版本号，用于指定操作的版本，可不传"
+    exit
+    ;;
+  ":")
+    echo -e "\033[31m参数${OPTARG}值必填\033[0m"
+    exitWithError
+    ;;
+  "?")
+    echo -e "\033[31m未知参数${OPTARG}\033[0m"
+    exitWithError
+    ;;
+  *)
+    echo -e "\033[31m处理参数时出现未知错误\033[0m"
+    exitWithError
+    ;;
+  esac
+done
+
+echo "version operate=${operate} version=${version}"
+
+curBranch=$(git symbolic-ref --short HEAD)
+
+echo -e "\033[32m当前分支：${curBranch}\033[0m"
+
+function goToOriginalBranch() {
+  git checkout "${curBranch}"
+  echo -e "\033[32m切换回原分支：${curBranch}\033[0m"
+}
+
+function gitMerge() {
+  echo -e "\033[32m合并分支：$1 to $2\033[0m"
+  git checkout $2
+  git pull
+  git merge $1 --no-edit
+  if [ $? -ne 0 ]; then
+    if [[ $3 == "notWait" ]]; then
+      return 1
+    else
+      while [[ $(git status | grep "nothing to commit") == "" ]]; do
+        echo -e "\033[33m等待解决合并冲突\033[0m"
+        sleep 1
+      done
+    fi
+  fi
+  git push
+  return 0
+}
+
+function tryToReadVersion() {
+  tryParseVersionFromBranch
+  if [[ $(echo "${version}" | grep -n "^.*[0-9]\{1,4\}\.[0-9]\{1,4\}\.[0-9]\{1,4\}$") == "" ]]; then
+    read -p "请输入版本号: " version
+  else
+    read -p "请输入版本号（如是版本'${version}'，可直接回车）: " version
+  fi
+  if [[ "${version}" == "" ]]; then
+    tryParseVersionFromBranch
+  fi
+  while [[ $(echo "${version}" | grep -n "^.*[0-9]\{1,4\}\.[0-9]\{1,4\}\.[0-9]\{1,4\}$") == "" ]]; do
+    read -p "请输入正确的版本号（如：1.0.0）: " version
+  done
+}
+
+function readVersion() {
+  if [ ! -n "${version}" ]; then
+    tryToReadVersion
+  fi
+
+  echo -e "\033[32m当前版本：${version}\033[0m"
+}
+
+function tryParseVersionFromBranch() {
+      if [ ! -n "${version}" ]; then
+        version=${curBranch%%/*}
+      fi
+}
+
+function parseVersionFromBranch() {
+  tryParseVersionFromBranch
+
+  echo -e "\033[32m当前版本：${version}\033[0m"
+}
+
+function readVersionFromFile() {
+  if [ ! -n "${version}" ]; then
+    if [ -f ".version" ]; then
+      version=$(cat .version)
+      if [[ $(echo "${version}" | grep -n "^.*[0-9]\{1,4\}\.[0-9]\{1,4\}\.[0-9]\{1,4\}$") == "" ]]; then
+        tryToReadVersion
+      fi
+    else
+      tryToReadVersion
+    fi
+  fi
+
+  echo -e "\033[32m当前版本：${version}\033[0m"
+}
+
+function clearUpdateMdFile() {
+  cat "${shPath}/update.md" >"doc/update.md"
+
+  git add -A
+  git commit -a -m "$(git symbolic-ref --short HEAD) 清空 update.md"
+}
+
+function checkVersionMainBranch() {
+  versionBranch="${version}/main"
+
+  if [[ $(git branch -r | grep "origin/${versionBranch}") != "" ]]; then
+    return
+  fi
+
+  if [[ $(git branch | grep "${versionBranch}") != "" ]]; then
+    git push origin "${versionBranch}"
+    git branch -d "${versionBranch}"
+    return
+  fi
+
+  echo -e "\033[32m创建版本主分支 ${versionBranch}，并推送到远程\033[0m"
+
+  git checkout master
+  git pull
+
+  git branch "${versionBranch}"
+  git push --set-upstream origin "${versionBranch}"
+
+  git checkout master
+  git branch -d "${versionBranch}"
+}
+
+function checkBranchNotExist() {
+  if [[ $(git branch -r | grep "origin/$1") != "" ]]; then
+    echo -e "\033[31m版本功能分支${1}远程已经存在\033[0m"
+
+    goToOriginalBranch
+    exitWithError
+  fi
+
+  if [[ $(git branch | grep "$1") != "" ]]; then
+    echo -e "\033[31m版本功能分支${1}本地已经存在\033[0m"
+
+    goToOriginalBranch
+    exitWithError
+  fi
+}
+
+function readFunc() {
+  if [ ! -n "${func}" ]; then
+    read -p "请输入新功能名: " func
+  fi
+
+  echo -e "\033[32m当前功能：${func}\033[0m"
+}
+
+function parseFuncFromBranch() {
+  if [ ! -n "${func}" ]; then
+    func=${curBranch#*/}
+  fi
+
+  echo -e "\033[32m当前功能：${func}\033[0m"
+}
+
+function createFuncBranchFromMaster() {
+
+  readFunc
+
+  funcBranch="${version}/${func}"
+
+  checkBranchNotExist "${funcBranch}"
+
+  git checkout master
+  git pull
+
+  git branch "${funcBranch}"
+  git push --set-upstream origin "${funcBranch}"
+  git checkout "${funcBranch}"
+}
+
+function newVersion() {
+  readVersion
+
+  checkVersionMainBranch
+
+  createFuncBranchFromMaster
+
+}
+
+function checkInvalidBranch() {
+  if [[ ${curBranch} == "master" || ${curBranch#*/} == "main" ]]; then
+    echo -e "\033[31m当前分支 ${curBranch} 错误，不能进行合并操作\033[0m"
+    exitWithError
+  fi
+}
+
+function checkVersionMainBranchHasNotMerged() {
+
+  if [[ $(git branch -r | grep "origin/${versionBranch}") == "" ]]; then
+      echo -e "\033[31m ${version} 版本主分支不存在\033[0m"
+      exitWithError
+  fi
+
+  git checkout "${versionBranch}"
+  git pull
+
+  noMerge=$(git branch -a --no-merged)
+  arr=($noMerge)
+  for s in ${arr[@]}; do
+    result=$(echo -e $s | grep "${version}")
+    if [[ $result != "" ]]; then
+      echo -e "\033[31m分支 ${s} 还没合并，请先合并后再发布\033[0m"
+      goToOriginalBranch
+      git branch -d "${versionBranch}"
+      exitWithError
+    fi
+  done
+}
+
+function checkMergeVersion() {
+  readVersion
+
+  versionBranch="${version}/main"
+
+  echo -e "\033[32m切换到版本主分支：${versionBranch}，准备检测\033[0m"
+
+  checkVersionMainBranchHasNotMerged
+
+  goToOriginalBranch
+
+  git branch -d "${versionBranch}"
+}
+
+function mergeVersion() {
+
+  checkInvalidBranch
+
+  git push
+
+  parseVersionFromBranch
+
+  versionBranch="${version}/main"
+
+  echo -e "\033[32m版本主分支：${versionBranch}\033[0m"
+
+  git checkout master
+  git pull
+  gitMerge master "${curBranch}"
+
+  gitMerge "${curBranch}" "${versionBranch}"
+
+  goToOriginalBranch
+
+  git branch -d "${versionBranch}"
+
+}
+
+function openUpdateMdFile() {
+  sys=$(uname)
+  proPath=$(pwd)
+  proName=${proPath##*/}
+
+  if [[ $sys == "Darwin" ]]; then
+    open "doc/update.md"
+  else
+    start "doc/update.md"
+  fi
+
+  echo -e "\033[32m打开 ${version} 版本升级步骤文档\033[0m"
+}
+
+function autoBuild() {
+  versionBranch="${version}/main"
+
+  openUpdateMdFile
+
+  echo -e "\033[32m ${version}版本 开始编译\033[0m"
+  
+  rm -rf dist
+  npm run build
+  if [ $? -eq 0 ]; then
+    echo -e "\033[32m ${version}版本 编译成功\033[0m"
+  else
+    echo -e "\033[31m ${version}版本 编译失败\033[0m"
+    goToOriginalBranch
+    git branch -d "${versionBranch}"
+    exitWithError
+  fi
+}
+
+function buildVersion() {
+
+  readVersion
+
+  versionBranch="${version}/main"
+
+  echo -e "\033[32m切换到版本主分支：${versionBranch}，准备发布\033[0m"
+
+  mergeMaster
+
+  checkVersionMainBranchHasNotMerged
+
+  autoBuild
+
+  tagName="${version}/build/$(date "+%Y%m%d%H%M%S")"
+
+  git tag -f "${tagName}"
+
+  git push -f origin "${tagName}"
+
+  echo -e "\033[32m${version} 版本增加标签 ${tagName}\033[0m"
+
+  echo -e "\033[32m${version} 版本打包成功\033[0m"
+
+  goToOriginalBranch
+
+  git branch -d "${versionBranch}"
+}
+
+function mergeMaster() {
+  if [[ $(git branch -r | grep "origin/${versionBranch}") == "" ]]; then
+      echo -e "\033[31m ${version} 版本主分支不存在\033[0m"
+      exitWithError
+  fi
+
+  git checkout "${versionBranch}"
+  git pull
+
+  noMerge=$(git branch -a --no-merged)
+  arr=($noMerge)
+  for s in ${arr[@]}; do
+    result=$(echo -e $s | grep "master")
+    if [[ $result != "" ]]; then
+      # 防止其他分支名包含master关键字
+      if [[ $result == "master" || $result == "origin/master" ]]; then
+        gitMerge "${result}" "${versionBranch}"
+      fi
+    fi
+  done
+}
+
+function openAndClearUpdateMdFile() {
+  sys=$(uname)
+  proPath=$(pwd)
+  proName=${proPath##*/}
+
+  if [[ $sys == "Darwin" ]]; then
+    cp "doc/update.md" "/tmp/${proName}.${version}.update.md"
+    cat "${shPath}/update.md" >"doc/update.md"
+    open "/tmp/${proName}.${version}.update.md"
+  else
+    if [ ! -d "C:/tmp" ]; then
+      mkdir "C:/tmp"
+    fi
+    cp "doc/update.md" "C:/tmp/${proName}.${version}.update.md"
+    cat "${shPath}/update.md" >"doc/update.md"
+    start "C:/tmp/${proName}.${version}.update.md"
+  fi
+
+  echo -e "\033[32m打开 ${version} 版本升级步骤文档\033[0m"
+}
+
+function publishVersion() {
+
+  readVersion
+
+  versionBranch="${version}/main"
+
+  echo -e "\033[32m切换到版本主分支：${versionBranch}，准备发布\033[0m"
+
+  checkVersionMainBranchHasNotMerged
+
+  echo -e "\033[32m合并分支 ${versionBranch} 到 master 分支，开始发布\033[0m"
+
+  gitMerge "${versionBranch}" master
+
+  git branch -d "${versionBranch}"
+
+  tagName="${version}/publish/$(date "+%Y%m%d%H%M%S")"
+
+  git tag -f "${tagName}"
+
+  git push -f origin "${tagName}"
+
+  echo -e "\033[32m${version} 版本增加标签 ${tagName}\033[0m"
+
+  openAndClearUpdateMdFile
+
+  echo "${version}" >.version
+
+  git add -A
+
+  git commit -a -m "升级版本：${version}"
+
+  git push
+
+  echo -e "\033[32m${version} 版本发布成功\033[0m"
+
+  goToOriginalBranch
+}
+
+function fixVersion() {
+  git checkout master
+  git pull
+
+  readVersionFromFile
+
+  createFuncBranchFromMaster
+
+}
+
+function deleteOldVersionMainBranch() {
+  oldVersionBranch="${oldVersion}/main"
+
+  if [[ $(git branch | grep "${oldVersionBranch}") != "" ]]; then
+    git branch -d "${oldVersionBranch}"
+  fi
+
+  if [[ $(git branch -r | grep "origin/${oldVersionBranch}") != "" ]]; then
+    git push --delete origin "${oldVersionBranch}"
+  fi
+}
+
+function moveFuncBranch() {
+  oldVersionBranch="${oldVersion}/${func}"
+  newVersionBranch="${version}/${func}"
+
+  if [[ $(git branch -a | grep "${newVersionBranch}") != "" ]]; then
+    echo -e "\033[31m新版本功能分支${newVersionBranch}已经存在\033[0m"
+
+    goToOriginalBranch
+
+    exitWithError
+  fi
+
+  git branch -m "${oldVersionBranch}" "${newVersionBranch}"
+  git push origin "${newVersionBranch}:${newVersionBranch}"
+  echo -e "\033[32m修改分支 ${oldVersionBranch} 为 ${newVersionBranch}\033[0m"
+
+  git push --delete origin "${oldVersionBranch}"
+  echo -e "\033[32m删除远程分支 ${oldVersionBranch}\033[0m"
+}
+
+function renewOldVersionMainBranch() {
+  if [[ $(git branch -a | grep "${oldVersion}") != "" ]]; then
+    version=${oldVersion}
+    checkVersionMainBranch
+  fi
+}
+
+function moveVersion() {
+
+  checkInvalidBranch
+
+  newVersion=${version}
+
+  parseVersionFromBranch
+
+  oldVersion=${version}
+
+  parseFuncFromBranch
+
+  version=${newVersion}
+
+  readVersion
+
+  checkVersionMainBranch
+
+  moveFuncBranch
+
+  deleteOldVersionMainBranch
+
+  renewOldVersionMainBranch
+
+  git checkout "${newVersionBranch}"
+}
+
+if [[ $(git status | grep "nothing to commit") == "" ]]; then
+  echo -e "\033[31m当前分支还没提交，请提交后再操作\033[0m"
+  exitWithError
+fi
+
+if [[ ${operate} == "new" ]]; then
+  newVersion
+elif [[ ${operate} == "check" ]]; then
+  checkMergeVersion
+elif [[ ${operate} == "merge" ]]; then
+  mergeVersion
+elif [[ ${operate} == "build" ]]; then
+  buildVersion
+elif [[ ${operate} == "publish" ]]; then
+  publishVersion
+elif [[ ${operate} == "fix" ]]; then
+  fixVersion
+elif [[ ${operate} == "move" ]]; then
+  moveVersion
+fi
+
+read -s -n1 -p "脚本执行成功，按任意键退出。"

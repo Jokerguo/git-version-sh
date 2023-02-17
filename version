@@ -2,58 +2,14 @@
 
 operate="merge"
 
+projectName="fhdq"
+
 shPath=$(dirname "$(readlink -f $0)")
 
 function exitWithError() {
   read -s -n1 -p "脚本执行失败，按任意键退出！"
   exit 1
 }
-
-while getopts ":o:v:h" optname; do
-  case "$optname" in
-  "o")
-    if [[ ${OPTARG} != "new" && ${OPTARG} != "merge" && ${OPTARG} != "check" && ${OPTARG} != "build"&& ${OPTARG} != "publish" && ${OPTARG} != "fix" && ${OPTARG} != "move" ]]; then
-      echo -e "\033[31m参数 -o ${OPTARG} 错误\033[0m"
-      exitWithError
-    fi
-    operate=${OPTARG}
-    ;;
-  "v")
-    version=${OPTARG}
-    ;;
-  "h")
-    echo "例如：./version.sh -o merge"
-    echo "-o  操作:     new merge check build publish fix move，默认为 merge"
-    echo "    new:      创建新的版本功能分支"
-    echo "    merge:    合并功能分支到版本主分支"
-    echo "    check:    检测当前版本的分支是否都合并到主分支"
-    echo "    build:    切换到版本主分支，等待打包"
-    echo "    publish:  发布版本，版本主分支合并到master分支"
-    echo "    fix:      创建一个修复分支，修复线上版本Bug"
-    echo "    move:     版本功能分支迁移到下个版本"
-    echo "-v 版本号，用于指定操作的版本，可不传"
-    exit
-    ;;
-  ":")
-    echo -e "\033[31m参数${OPTARG}值必填\033[0m"
-    exitWithError
-    ;;
-  "?")
-    echo -e "\033[31m未知参数${OPTARG}\033[0m"
-    exitWithError
-    ;;
-  *)
-    echo -e "\033[31m处理参数时出现未知错误\033[0m"
-    exitWithError
-    ;;
-  esac
-done
-
-echo "version operate=${operate} version=${version}"
-
-curBranch=$(git symbolic-ref --short HEAD)
-
-echo -e "\033[32m当前分支：${curBranch}\033[0m"
 
 function goToOriginalBranch() {
   git checkout "${curBranch}"
@@ -291,23 +247,19 @@ function openUpdateMdFile() {
   proPath=$(pwd)
   proName=${proPath##*/}
 
-  if [[ $sys == "Darwin" ]]; then
-    open "doc/update.md"
-  else
-    start "doc/update.md"
+  if [[ $projectName == 'fhdq' ]]; then
+    if [[ $sys == "Darwin" ]]; then
+      open "doc/update.md"
+    else
+      start "doc/update.md"
+    fi
   fi
 
   echo -e "\033[32m打开 ${version} 版本升级步骤文档\033[0m"
 }
 
-function autoBuild() {
-  versionBranch="${version}/main"
-
-  openUpdateMdFile
-
-  echo -e "\033[32m ${version}版本 开始编译\033[0m"
-  
-  rm -rf dist
+# build
+function handleBuild(){
   npm run build
   if [ $? -eq 0 ]; then
     echo -e "\033[32m ${version}版本 编译成功\033[0m"
@@ -319,6 +271,7 @@ function autoBuild() {
   fi
 }
 
+# Q版小程序build
 function buildVersion() {
 
   readVersion
@@ -331,7 +284,13 @@ function buildVersion() {
 
   checkVersionMainBranchHasNotMerged
 
-  autoBuild
+  openUpdateMdFile
+
+  echo -e "\033[32m ${version}版本 开始编译\033[0m"
+  
+  rm -rf dist
+
+  handleBuild
 
   tagName="${version}/build/$(date "+%Y%m%d%H%M%S")"
 
@@ -347,6 +306,117 @@ function buildVersion() {
 
   git branch -d "${versionBranch}"
 }
+
+# 运营系统build
+function operatorBuildVersion() {
+  readVersion
+
+  versionBranch="${version}/main"
+
+  echo -e "\033[32m切换到版本主分支：${versionBranch}，准备发布\033[0m"
+
+  mergeMaster
+
+  checkVersionMainBranchHasNotMerged
+
+  echo "选择要发布的环境（输入1|2|3）"
+  options=("dev" "test" "prod")
+  select opt in "${options[@]}"
+  do
+      case $opt in
+          "dev")
+              gitMerge ${versionBranch} dev
+
+              buildAndPush
+              echo -e "\e[31m接下来干这事： \e[0m"
+              echo -e "\e[35m钉钉@cyc，cyc会打包部署到dev环境\e[0m"
+
+              break
+              ;;
+          "test")
+              buildAndPush
+              echo -e "\e[31m接下来干这事： \e[0m"
+              echo -e "\e[35m自己不行就呼叫测试或者后端同学构建部署该分支，即可在test环境进行测试 \e[0m"
+
+              break
+              ;;
+          "prod")
+              echo -e "\e[31m接下来干这事： \e[0m"
+              echo -e "\e[35m钉钉@cyc，告诉他升级的分支，cyc会打包部署到prod环境 \e[0m"
+
+              break
+              ;;
+          *) echo 重选去!;;
+      esac
+  done
+
+  # echo -e "\033[32m${version} 版本打包成功\033[0m"
+
+  goToOriginalBranch
+
+  git branch -d "${versionBranch}"
+
+}
+
+function buildAndPush(){
+  handleBuild
+
+  git add -A
+
+  git commit -a -m "build dist"
+
+  git push
+}
+
+# 开放平台build
+function officialBuildVersion() {
+  readVersion
+
+  versionBranch="${version}/main"
+
+  echo -e "\033[32m切换到版本主分支：${versionBranch}，准备发布\033[0m"
+
+  mergeMaster
+
+  checkVersionMainBranchHasNotMerged
+
+  echo "选择要打包的项目（输入1|2）"
+  options=("open" "index")
+  select opt in "${options[@]}"
+  do
+      case $opt in
+          "open")
+              officialBuildAndOpenFile open
+              break
+              ;;
+          "index")
+              officialBuildAndOpenFile index
+              break
+              ;;
+          *) echo 重选去!;;
+      esac
+  done
+
+  goToOriginalBranch
+
+  git branch -d "${versionBranch}"
+
+}
+
+# 开放平台打包并打开文件
+function officialBuildAndOpenFile(){
+    npm run build:$1
+    sys=$(uname)
+    proPath=$(pwd)
+    if [[ $sys == "Darwin" ]]; then
+      open ${proPath}
+    else
+      start ${proPath}
+    fi
+    echo -e "\e[31m接下来干这事： \e[0m"
+    echo -e "\e[35m钉钉@cyc，将打包文件发给他 \e[0m"
+}
+
 
 function mergeMaster() {
   if [[ $(git branch -r | grep "origin/${versionBranch}") == "" ]]; then
@@ -506,6 +576,55 @@ function moveVersion() {
   git checkout "${newVersionBranch}"
 }
 
+while getopts ":o:v:p:h" optname; do
+  case "$optname" in
+  "o")
+    if [[ ${OPTARG} != "new" && ${OPTARG} != "merge" && ${OPTARG} != "check" && ${OPTARG} != "publish" && ${OPTARG} != "fix" && ${OPTARG} != "move" && ${OPTARG} != "build" ]]; then
+      echo -e "\033[31m参数 -o ${OPTARG} 错误\033[0m"
+      exitWithError
+    fi
+    operate=${OPTARG}
+    ;;
+  "v")
+    version=${OPTARG}
+    ;;
+  "p")
+    projectName=${OPTARG}
+    ;;
+  "h")
+    echo "例如：./version.sh -o merge"
+    echo "-o  操作:     new merge check build publish fix move，默认为 merge"
+    echo "    new:      创建新的版本功能分支"
+    echo "    merge:    合并功能分支到版本主分支"
+    echo "    check:    检测当前版本的分支是否都合并到主分支"
+    echo "    build:    切换到版本主分支，等待打包"
+    echo "    publish:  发布版本，版本主分支合并到master分支"
+    echo "    fix:      创建一个修复分支，修复线上版本Bug"
+    echo "    move:     版本功能分支迁移到下个版本"
+    echo "-v 版本号，用于指定操作的版本，可不传"
+    exit
+    ;;
+  ":")
+    echo -e "\033[31m参数${OPTARG}值必填\033[0m"
+    exitWithError
+    ;;
+  "?")
+    echo -e "\033[31m未知参数${OPTARG}\033[0m"
+    exitWithError
+    ;;
+  *)
+    echo -e "\033[31m处理参数时出现未知错误\033[0m"
+    exitWithError
+    ;;
+  esac
+done
+
+echo "version operate=${operate} version=${version}"
+
+curBranch=$(git symbolic-ref --short HEAD)
+
+echo -e "\033[32m当前分支：${curBranch}\033[0m"
+
 if [[ $(git status | grep "nothing to commit") == "" ]]; then
   echo -e "\033[31m当前分支还没提交，请提交后再操作\033[0m"
   exitWithError
@@ -518,7 +637,16 @@ elif [[ ${operate} == "check" ]]; then
 elif [[ ${operate} == "merge" ]]; then
   mergeVersion
 elif [[ ${operate} == "build" ]]; then
-  buildVersion
+  echo -e "\033[32m当前打包项目：${projectName}\033[0m"
+  if [[ ${projectName} == 'fhdq' ]]; then
+    buildVersion
+  elif [[ ${projectName} == "operator-ts" ]]; then
+    operatorBuildVersion
+  elif [[ ${projectName} == "official-ts" ]]; then
+    officialBuildVersion
+  else
+    echo "${projectName} 这是啥项目？"
+  fi
 elif [[ ${operate} == "publish" ]]; then
   publishVersion
 elif [[ ${operate} == "fix" ]]; then

@@ -195,7 +195,7 @@ function checkVersionMainBranchHasNotMerged() {
   arr=($noMerge)
   for s in ${arr[@]}; do
     result=$(echo -e $s | grep "${version}")
-    if [[ $result != "" ]]; then
+    if [[ $s == "master" || $s == "origin/master" || $result != "" ]]; then
       echo -e "\033[31m分支 ${s} 还没合并，请先合并后再发布\033[0m"
       goToOriginalBranch
       git branch -d "${versionBranch}"
@@ -247,7 +247,7 @@ function openUpdateMdFile() {
   proPath=$(pwd)
   proName=${proPath##*/}
 
-  if [[ $projectName == 'fhdq' ]]; then
+  if [[ $projectName == 'fhdq' || $projectName == 'operator-ts' ]]; then
     if [[ $sys == "Darwin" ]]; then
       open "doc/update.md"
     else
@@ -286,25 +286,26 @@ function buildVersion() {
 
   openUpdateMdFile
 
-  echo -e "\033[32m ${version}版本 开始编译\033[0m"
-  
-  rm -rf dist
+  chooseIsBuild
+}
 
-  handleBuild
-
-  tagName="${version}/build/$(date "+%Y%m%d%H%M%S")"
-
-  git tag -f "${tagName}"
-
-  git push -f origin "${tagName}"
-
-  echo -e "\033[32m${version} 版本增加标签 ${tagName}\033[0m"
-
-  echo -e "\033[32m${version} 版本打包成功\033[0m"
-
-  goToOriginalBranch
-
-  git branch -d "${versionBranch}"
+function chooseIsBuild(){
+  read -p "是否需要编译，(请输入yes/no): " whether
+  if [[ "${whether}" == "yes" ]]; then
+    echo -e "\033[32m ${version}版本 开始编译\033[0m"
+    rm -rf dist
+    handleBuild
+    echo -e "\033[32m${version} 版本打包成功\033[0m"
+    goToOriginalBranch
+    git branch -d "${versionBranch}"
+  elif [[ "${whether}" == "no" ]]; then
+    echo -e "\033[32m 不需要编译!! \033[0m"
+    read -p "铁汁！ 上传好了按任意键切回原分支："
+    goToOriginalBranch
+    git branch -d "${versionBranch}"
+  else
+    chooseIsBuild
+  fi
 }
 
 # 运营系统build
@@ -318,6 +319,8 @@ function operatorBuildVersion() {
   mergeMaster
 
   checkVersionMainBranchHasNotMerged
+
+  openUpdateMdFile
 
   echo "选择要发布的环境（输入1|2|3）"
   options=("dev" "test" "prod")
